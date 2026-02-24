@@ -1,6 +1,6 @@
 "use client";
 
-import { TransformControls, useTexture } from "@react-three/drei";
+import { Edges, TransformControls, useTexture } from "@react-three/drei";
 import { useEffect, useRef } from "react";
 import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
@@ -45,15 +45,26 @@ export function PanelPlane({ panel, isSelected, transformMode }: PanelPlaneProps
       position={panel.position}
       rotation={panel.rotation}
       onClick={handleSelect}
-      castShadow={false}
-      receiveShadow={false}
+      castShadow
+      receiveShadow
     >
       <planeGeometry args={[panel.width, panel.height]} />
       <meshStandardMaterial
         map={texture}
         color={isSelected ? "#f8fafc" : "#ffffff"}
+        roughness={0.9}
+        metalness={0.02}
         side={THREE.DoubleSide}
       />
+      {isSelected ? (
+        <Edges
+          scale={1.01}
+          threshold={1}
+          color="#7dd3fc"
+          lineWidth={1}
+          renderOrder={10}
+        />
+      ) : null}
     </mesh>
   );
 
