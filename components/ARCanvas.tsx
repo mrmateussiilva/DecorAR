@@ -1,7 +1,7 @@
 "use client";
 
 import { OrbitControls } from "@react-three/drei";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas } from "@react-three/fiber";
 import {
   MutableRefObject,
   RefObject,
@@ -21,6 +21,7 @@ type ARCanvasProps = {
 };
 
 type XRSupportState = "checking" | "supported" | "unsupported";
+type ARPlacementState = "scanning" | "surface-found" | "placed";
 type QuaternionTuple = [number, number, number, number];
 type HitPoseSnapshot = {
   position: [number, number, number];
@@ -29,31 +30,46 @@ type HitPoseSnapshot = {
 
 type XRPlacementTrackerProps = {
   session: XRSession | null;
-  placementLocked: boolean;
+  placementLockedRef: MutableRefObject<boolean>;
   reticleRef: RefObject<THREE.Group>;
   latestHitPoseRef: MutableRefObject<HitPoseSnapshot | null>;
   onHitAvailabilityChange: (available: boolean) => void;
+  onHitTestError: (message: string) => void;
 };
 
 function XRPlacementTracker({
   session,
-  placementLocked,
+  placementLockedRef,
   reticleRef,
   latestHitPoseRef,
-  onHitAvailabilityChange
+  onHitAvailabilityChange,
+  onHitTestError
 }: XRPlacementTrackerProps) {
   const hitTestSourceRef = useRef<XRHitTestSource | null>(null);
+  const localFloorReferenceSpaceRef = useRef<XRReferenceSpace | null>(null);
   const viewerReferenceSpaceRef = useRef<XRReferenceSpace | null>(null);
+  const xrAnimationFrameIdRef = useRef<number | null>(null);
   const hitStateRef = useRef(false);
+  const lastLoggedHitCountRef = useRef<number | null>(null);
 
   useEffect(() => {
     let isDisposed = false;
 
     const cleanup = () => {
+      if (session && xrAnimationFrameIdRef.current !== null) {
+        try {
+          session.cancelAnimationFrame(xrAnimationFrameIdRef.current);
+        } catch {
+          // Session may already be closed.
+        }
+      }
+      xrAnimationFrameIdRef.current = null;
       hitTestSourceRef.current?.cancel();
       hitTestSourceRef.current = null;
+      localFloorReferenceSpaceRef.current = null;
       viewerReferenceSpaceRef.current = null;
       latestHitPoseRef.current = null;
+      lastLoggedHitCountRef.current = null;
       if (reticleRef.current) {
         reticleRef.current.visible = false;
       }
@@ -71,18 +87,91 @@ function XRPlacementTracker({
     const setupHitTest = async () => {
       try {
         if (!session.requestHitTestSource) {
+          console.warn("[AR] hit-test not supported by this XR session.");
+          onHitTestError("Hit-test não suportado nesta sessão WebXR.");
           cleanup();
           return;
         }
 
+        const localFloorReferenceSpace = await session.requestReferenceSpace("local-floor");
+        if (isDisposed) return;
+        localFloorReferenceSpaceRef.current = localFloorReferenceSpace;
+
         const viewerReferenceSpace = await session.requestReferenceSpace("viewer");
         if (isDisposed) return;
         viewerReferenceSpaceRef.current = viewerReferenceSpace;
+
         hitTestSourceRef.current =
           (await session.requestHitTestSource({
             space: viewerReferenceSpace
           })) ?? null;
+
+        console.log("[AR] hit-test source created");
+
+        const onXRFrame = (_time: DOMHighResTimeStamp, frame: XRFrame) => {
+          if (isDisposed) return;
+
+          xrAnimationFrameIdRef.current = session.requestAnimationFrame(onXRFrame);
+
+          const hitTestSource = hitTestSourceRef.current;
+          const localFloorReferenceSpace = localFloorReferenceSpaceRef.current;
+          if (!hitTestSource || !localFloorReferenceSpace) return;
+
+          const hitResults = frame.getHitTestResults(hitTestSource);
+          if (lastLoggedHitCountRef.current !== hitResults.length) {
+            lastLoggedHitCountRef.current = hitResults.length;
+            console.log("[AR] hit results length:", hitResults.length);
+          }
+
+          const hit = hitResults[0];
+          const pose = hit?.getPose(localFloorReferenceSpace);
+
+          if (!pose) {
+            latestHitPoseRef.current = null;
+            if (reticleRef.current && !placementLockedRef.current) {
+              reticleRef.current.visible = false;
+            }
+            if (hitStateRef.current) {
+              hitStateRef.current = false;
+              onHitAvailabilityChange(false);
+            }
+            return;
+          }
+
+          const { position, orientation } = pose.transform;
+          latestHitPoseRef.current = {
+            position: [position.x, position.y, position.z],
+            quaternion: [orientation.x, orientation.y, orientation.z, orientation.w]
+          };
+
+          if (!hitStateRef.current) {
+            hitStateRef.current = true;
+            onHitAvailabilityChange(true);
+          }
+
+          if (placementLockedRef.current) {
+            if (reticleRef.current) {
+              reticleRef.current.visible = false;
+            }
+            return;
+          }
+
+          if (reticleRef.current) {
+            reticleRef.current.visible = true;
+            reticleRef.current.position.set(position.x, position.y, position.z);
+            reticleRef.current.quaternion.set(
+              orientation.x,
+              orientation.y,
+              orientation.z,
+              orientation.w
+            );
+          }
+        };
+
+        xrAnimationFrameIdRef.current = session.requestAnimationFrame(onXRFrame);
+        console.log("[AR] local-floor reference space created");
       } catch {
+        onHitTestError("Falha ao inicializar hit-test. Verifique suporte WebXR/hit-test no dispositivo.");
         cleanup();
       }
     };
@@ -99,52 +188,7 @@ function XRPlacementTracker({
       session.removeEventListener("end", handleSessionEnd);
       cleanup();
     };
-  }, [session, latestHitPoseRef, onHitAvailabilityChange, reticleRef]);
-
-  useFrame(({ gl }, _, xrFrame) => {
-    if (!session || !xrFrame || !hitTestSourceRef.current) return;
-
-    const xrReferenceSpace = gl.xr.getReferenceSpace();
-    if (!xrReferenceSpace) return;
-
-    const hitResults = xrFrame.getHitTestResults(hitTestSourceRef.current);
-    const hit = hitResults[0];
-    const pose = hit?.getPose(xrReferenceSpace);
-
-    if (!pose) {
-      latestHitPoseRef.current = null;
-      if (reticleRef.current && !placementLocked) {
-        reticleRef.current.visible = false;
-      }
-      if (hitStateRef.current) {
-        hitStateRef.current = false;
-        onHitAvailabilityChange(false);
-      }
-      return;
-    }
-
-    const { position, orientation } = pose.transform;
-    latestHitPoseRef.current = {
-      position: [position.x, position.y, position.z],
-      quaternion: [orientation.x, orientation.y, orientation.z, orientation.w]
-    };
-
-    if (!hitStateRef.current) {
-      hitStateRef.current = true;
-      onHitAvailabilityChange(true);
-    }
-
-    if (!placementLocked && reticleRef.current) {
-      reticleRef.current.visible = true;
-      reticleRef.current.position.set(position.x, position.y, position.z);
-      reticleRef.current.quaternion.set(
-        orientation.x,
-        orientation.y,
-        orientation.z,
-        orientation.w
-      );
-    }
-  });
+  }, [latestHitPoseRef, onHitAvailabilityChange, onHitTestError, placementLockedRef, reticleRef, session]);
 
   return null;
 }
@@ -195,16 +239,41 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
   const [xrSupportState, setXrSupportState] = useState<XRSupportState>("checking");
   const [xrMessage, setXrMessage] = useState<string>("Verificando suporte a AR...");
   const [xrSession, setXrSession] = useState<XRSession | null>(null);
-  const [isPlacementLocked, setIsPlacementLocked] = useState(false);
-  const [hitAvailable, setHitAvailable] = useState(false);
+  const [arPlacementState, setArPlacementState] = useState<ARPlacementState>("scanning");
   const [sceneRootPosition, setSceneRootPosition] = useState<[number, number, number]>([0, 0, 0]);
   const [sceneRootQuaternion, setSceneRootQuaternion] = useState<QuaternionTuple>([0, 0, 0, 1]);
 
   const isARActive = xrSession !== null;
+  const isPlacementLocked = arPlacementState === "placed";
+  const hitAvailable = arPlacementState === "surface-found";
 
-  useEffect(() => {
-    placementLockedRef.current = isPlacementLocked;
-  }, [isPlacementLocked]);
+  const updatePlacementState = useCallback((nextState: ARPlacementState) => {
+    placementLockedRef.current = nextState === "placed";
+    setArPlacementState(nextState);
+  }, []);
+
+  const arPlacementBadge = useMemo(() => {
+    if (!isARActive) return null;
+
+    if (arPlacementState === "placed") {
+      return {
+        label: "Posicionado",
+        className: "border-emerald-300/30 bg-emerald-400/15 text-emerald-200"
+      };
+    }
+
+    if (arPlacementState === "surface-found") {
+      return {
+        label: "Superfície encontrada",
+        className: "border-sky-300/30 bg-sky-400/15 text-sky-200"
+      };
+    }
+
+    return {
+      label: "Escaneando",
+      className: "border-amber-300/30 bg-amber-400/15 text-amber-200"
+    };
+  }, [arPlacementState, isARActive]);
 
   useEffect(() => {
     let isMounted = true;
@@ -244,33 +313,45 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
   }, []);
 
   const updateXrInstructionMessage = useCallback(
-    (options?: { active?: boolean; hitAvailable?: boolean; placed?: boolean }) => {
+    (options?: { active?: boolean; placementState?: ARPlacementState }) => {
       const active = options?.active ?? isARActive;
-      const available = options?.hitAvailable ?? hitAvailable;
-      const placed = options?.placed ?? isPlacementLocked;
+      const placementState = options?.placementState ?? arPlacementState;
 
       if (!active) return;
-      if (placed) {
+      if (placementState === "placed") {
         setXrMessage("AR ativo. Cena posicionada no ambiente real.");
         return;
       }
-      if (available) {
+      if (placementState === "surface-found") {
         setXrMessage("Superfície detectada. Toque na tela para posicionar a cena.");
         return;
       }
       setXrMessage("Mova o dispositivo para detectar uma superfície.");
     },
-    [hitAvailable, isARActive, isPlacementLocked]
+    [arPlacementState, isARActive]
   );
 
   const handleHitAvailabilityChange = useCallback(
     (available: boolean) => {
-      setHitAvailable(available);
+      if (placementLockedRef.current) return;
+
+      const nextPlacementState: ARPlacementState = available ? "surface-found" : "scanning";
+      updatePlacementState(nextPlacementState);
       if (xrSessionRef.current) {
-        updateXrInstructionMessage({ active: true, hitAvailable: available });
+        updateXrInstructionMessage({ active: true, placementState: nextPlacementState });
       }
     },
-    [updateXrInstructionMessage]
+    [updatePlacementState, updateXrInstructionMessage]
+  );
+
+  const handleHitTestError = useCallback(
+    (message: string) => {
+      if (!placementLockedRef.current) {
+        updatePlacementState("scanning");
+      }
+      setXrMessage(message);
+    },
+    [updatePlacementState]
   );
 
   const exitARSession = useCallback(async () => {
@@ -283,6 +364,18 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
       setXrMessage("Falha ao encerrar sessão AR.");
     }
   }, []);
+
+  const resetPlacement = useCallback(() => {
+    if (!xrSessionRef.current) return;
+
+    latestHitPoseRef.current = null;
+    if (reticleRef.current) {
+      reticleRef.current.visible = false;
+    }
+
+    updatePlacementState("scanning");
+    updateXrInstructionMessage({ active: true, placementState: "scanning" });
+  }, [updatePlacementState, updateXrInstructionMessage]);
 
   const enterARSession = useCallback(async () => {
     if (xrSupportState !== "supported") return;
@@ -301,9 +394,7 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
 
     try {
       setXrMessage("Iniciando sessão AR...");
-      setIsPlacementLocked(false);
-      placementLockedRef.current = false;
-      setHitAvailable(false);
+      updatePlacementState("scanning");
       setSceneRootPosition([0, 0, 0]);
       setSceneRootQuaternion([0, 0, 0, 1]);
       latestHitPoseRef.current = null;
@@ -319,14 +410,13 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
       }
 
       const session = await xrNavigator.requestSession("immersive-ar", sessionInit);
+      console.log("[AR] XR session started");
       xrSessionRef.current = session;
 
       const handleSessionEnd = () => {
         xrSessionRef.current = null;
         setXrSession(null);
-        setIsPlacementLocked(false);
-        placementLockedRef.current = false;
-        setHitAvailable(false);
+        updatePlacementState("scanning");
         setSceneRootPosition([0, 0, 0]);
         setSceneRootQuaternion([0, 0, 0, 1]);
         if (reticleRef.current) {
@@ -345,8 +435,7 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
 
         setSceneRootPosition(hitPose.position);
         setSceneRootQuaternion(hitPose.quaternion);
-        setIsPlacementLocked(true);
-        placementLockedRef.current = true;
+        updatePlacementState("placed");
         setXrMessage("Cena posicionada. AR ativo.");
 
         if (reticleRef.current) {
@@ -357,18 +446,18 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
       session.addEventListener("end", handleSessionEnd);
       session.addEventListener("select", handleSelect);
 
-      renderer.xr.setReferenceSpaceType("local");
+      renderer.xr.setReferenceSpaceType("local-floor");
       await renderer.xr.setSession(session);
 
       setXrSession(session);
-      updateXrInstructionMessage({ active: true, hitAvailable: false, placed: false });
+      updateXrInstructionMessage({ active: true, placementState: "scanning" });
     } catch (error) {
       xrSessionRef.current = null;
       const errorMessage =
         error instanceof Error ? error.message : "Não foi possível iniciar o modo AR.";
       setXrMessage(`Falha ao iniciar AR: ${errorMessage}`);
     }
-  }, [selectPanel, updateXrInstructionMessage, xrSupportState]);
+  }, [selectPanel, updatePlacementState, updateXrInstructionMessage, xrSupportState]);
 
   const arOverlayStatusText = useMemo(() => {
     if (isARActive && !isPlacementLocked) {
@@ -432,10 +521,11 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
         {isARActive ? (
           <XRPlacementTracker
             session={xrSession}
-            placementLocked={isPlacementLocked}
+            placementLockedRef={placementLockedRef}
             reticleRef={reticleRef}
             latestHitPoseRef={latestHitPoseRef}
             onHitAvailabilityChange={handleHitAvailabilityChange}
+            onHitTestError={handleHitTestError}
           />
         ) : null}
 
@@ -488,19 +578,39 @@ export function ARCanvas({ transformMode }: ARCanvasProps) {
 
       <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex justify-between gap-3">
         <div className="pointer-events-auto max-w-[min(100%,26rem)] rounded-xl border border-white/10 bg-slate-950/80 px-3 py-2 text-xs text-slate-200 backdrop-blur">
-          <p className="font-medium text-slate-100">{isARActive ? "AR Mode" : "WebXR AR"}</p>
+          <div className="flex items-center gap-2">
+            <p className="font-medium text-slate-100">{isARActive ? "AR Mode" : "WebXR AR"}</p>
+            {arPlacementBadge ? (
+              <span
+                className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${arPlacementBadge.className}`}
+              >
+                {arPlacementBadge.label}
+              </span>
+            ) : null}
+          </div>
           <p className="mt-1 text-slate-300">{arOverlayStatusText}</p>
         </div>
 
         <div className="pointer-events-auto flex shrink-0 items-start gap-2">
           {isARActive ? (
-            <button
-              type="button"
-              onClick={() => void exitARSession()}
-              className="rounded-lg border border-white/15 bg-slate-950/85 px-3 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-slate-900"
-            >
-              Exit AR Mode
-            </button>
+            <>
+              {isPlacementLocked ? (
+                <button
+                  type="button"
+                  onClick={resetPlacement}
+                  className="rounded-lg border border-sky-300/20 bg-sky-400/15 px-3 py-2 text-sm font-medium text-sky-100 backdrop-blur transition hover:bg-sky-400/20"
+                >
+                  Reposicionar
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void exitARSession()}
+                className="rounded-lg border border-white/15 bg-slate-950/85 px-3 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-slate-900"
+              >
+                Exit AR Mode
+              </button>
+            </>
           ) : (
             <button
               type="button"
