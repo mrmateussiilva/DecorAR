@@ -14,8 +14,8 @@ Base de um SaaS em Next.js 14 para upload de imagem e preview em um plano 3D tex
 ## Como rodar
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Abra `http://localhost:3000/ar`.
