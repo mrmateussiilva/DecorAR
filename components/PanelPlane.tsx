@@ -11,9 +11,17 @@ type PanelPlaneProps = {
   panel: PanelItem;
   isSelected: boolean;
   transformMode: "translate" | "rotate";
+  transformEnabled?: boolean;
+  selectionEnabled?: boolean;
 };
 
-export function PanelPlane({ panel, isSelected, transformMode }: PanelPlaneProps) {
+export function PanelPlane({
+  panel,
+  isSelected,
+  transformMode,
+  transformEnabled = true,
+  selectionEnabled = true
+}: PanelPlaneProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const selectPanel = useEditorStore((state) => state.selectPanel);
   const updatePanel = useEditorStore((state) => state.updatePanel);
@@ -25,6 +33,7 @@ export function PanelPlane({ panel, isSelected, transformMode }: PanelPlaneProps
   }, [texture]);
 
   const handleSelect = (event: ThreeEvent<MouseEvent>) => {
+    if (!selectionEnabled) return;
     event.stopPropagation();
     selectPanel(panel.id);
   };
@@ -68,7 +77,7 @@ export function PanelPlane({ panel, isSelected, transformMode }: PanelPlaneProps
     </mesh>
   );
 
-  if (!isSelected) {
+  if (!isSelected || !transformEnabled) {
     return meshElement;
   }
 
