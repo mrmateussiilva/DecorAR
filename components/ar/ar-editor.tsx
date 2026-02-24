@@ -33,7 +33,7 @@ export function AREditor() {
 
     try {
       const nextTexture = await fileToTexture(file);
-      setTexture((currentTexture) => {
+      setTexture((currentTexture: THREE.Texture | null) => {
         currentTexture?.dispose();
         return nextTexture;
       });
