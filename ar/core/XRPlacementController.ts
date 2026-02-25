@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { ARState, HitPoseSnapshot, QuaternionTuple } from "./types";
+import type { HitPoseSnapshot, QuaternionTuple } from "./types";
+import { quaternionToVerticalYaw } from "./poseUtils";
 
 export type XRPlacementControllerOptions = {
   /** Ref com o último hit pose (preenchido por XRHitTestManager). */
@@ -51,7 +52,7 @@ export function useXRPlacementController(
     if (!pose) return;
     placementLockedRef.current = true;
     setSceneRootPosition(pose.position);
-    setSceneRootQuaternion(pose.quaternion);
+    setSceneRootQuaternion(quaternionToVerticalYaw(pose.quaternion));
     setPlacementState("placed");
     onPlace?.();
   }, [latestHitPoseRef, onPlace]);

@@ -1,5 +1,6 @@
 export { AR_STATE_MESSAGES } from "./types";
 export type { ARState, HitPoseSnapshot, QuaternionTuple, XRSupportStatus } from "./types";
+export { quaternionToVerticalYaw } from "./poseUtils";
 export { useXRSessionManager } from "./XRSessionManager";
 export type { XRSessionManagerOptions, XRSessionManagerResult } from "./XRSessionManager";
 export { useXRHitTestManager } from "./XRHitTestManager";
